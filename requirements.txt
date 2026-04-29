@@ -2,7 +2,7 @@ numpy
 pandas
 requests
 scipy
-arch>=6.2.0,<7.0.0
+arch>=7.0.0
 tqdm
 streamlit
 plotly
