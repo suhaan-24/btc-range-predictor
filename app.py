@@ -60,6 +60,10 @@ def get_live_prediction():
 with st.spinner("Fetching live data & running 10,000 simulations..."):
     prices, low_95, high_95, current_price, sigma_fig = get_live_prediction()
 
+# Keep UTC timestamp for history file, then convert index to IST for display
+_utc_last_bar = prices.index[-1]
+prices.index = prices.index.tz_localize('UTC').tz_convert('Asia/Kolkata')
+
 # Display current prediction
 st.subheader("Live Prediction")
 c1, c2, c3 = st.columns(3)
@@ -105,9 +109,8 @@ def load_history():
     return pd.DataFrame(records)
 
 
-# Save current prediction
-last_bar_time = prices.index[-1]
-save_prediction(last_bar_time, current_price, low_95, high_95)
+# Save current prediction (store UTC timestamp in history file)
+save_prediction(_utc_last_bar, current_price, low_95, high_95)
 
 
 # ─── Chart: Last 50 bars + Prediction Ribbon ────────────────────────────────
@@ -182,7 +185,7 @@ fig.add_trace(go.Scatter(
 ))
 
 fig.update_layout(
-    xaxis_title="Time (UTC)",
+    xaxis_title="Time (IST)",
     yaxis_title="Price (USD)",
     height=500,
     template="plotly_white",
@@ -200,12 +203,16 @@ if not history.empty:
     st.subheader("Prediction History")
     st.caption("Predictions are saved on each visit. Actuals fill in as candles close.")
 
-    # Try to fill in actuals from current price data
-    history["timestamp"] = pd.to_datetime(history["timestamp"])
+    # Convert history timestamps from UTC to IST for display and matching
+    history["timestamp"] = (
+        pd.to_datetime(history["timestamp"])
+        .dt.tz_localize('UTC', ambiguous='infer', nonexistent='shift_forward')
+        .dt.tz_convert('Asia/Kolkata')
+    )
     history = history.drop_duplicates(subset=["timestamp"], keep="last")
     history = history.sort_values("timestamp", ascending=False)
 
-    # Match actuals
+    # Match actuals (both prices.index and history timestamps are now IST)
     price_dict = prices.to_dict()
     history["actual"] = history["timestamp"].apply(
         lambda t: price_dict.get(t, None)
@@ -221,7 +228,7 @@ if not history.empty:
         history[display_cols].head(50),
         use_container_width=True,
         column_config={
-            "timestamp": "Predicted For",
+            "timestamp": "Predicted For (IST)",
             "current_price": st.column_config.NumberColumn("Price at Prediction", format="$%.2f"),
             "low_95": st.column_config.NumberColumn("Low (2.5%)", format="$%.2f"),
             "high_95": st.column_config.NumberColumn("High (97.5%)", format="$%.2f"),
