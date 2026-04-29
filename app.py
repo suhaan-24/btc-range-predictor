@@ -1,0 +1,208 @@
+"""
+Part B + C — Live BTC Prediction Dashboard with Persistence.
+Streamlit app that shows live predictions and stores history.
+"""
+
+import json
+import os
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+from datetime import datetime
+from model import fetch_btc_data, predict_range
+
+
+# ─── Page Config ─────────────────────────────────────────────────────────────
+
+st.set_page_config(
+    page_title="BTC Range Predictor",
+    page_icon="₿",
+    layout="wide"
+)
+
+st.title("₿ Bitcoin Next-Hour Range Predictor")
+st.caption("GBM Monte Carlo model — BTCUSDT 1h candles via Binance")
+
+
+# ─── Load Backtest Metrics ───────────────────────────────────────────────────
+
+METRICS_FILE = "backtest_metrics.json"
+HISTORY_FILE = "prediction_history.jsonl"
+
+if os.path.exists(METRICS_FILE):
+    with open(METRICS_FILE) as f:
+        metrics = json.load(f)
+else:
+    metrics = {"coverage_95": 0.0, "avg_width_95": 0.0, "mean_winkler_95": 0.0}
+
+# ─── Backtest Metrics Row ────────────────────────────────────────────────────
+
+st.subheader("Backtest Performance (30-day)")
+col1, col2, col3 = st.columns(3)
+col1.metric("Coverage (95%)", f"{metrics['coverage_95']:.2%}")
+col2.metric("Avg Width", f"${metrics['avg_width_95']:,.2f}")
+col3.metric("Mean Winkler", f"${metrics['mean_winkler_95']:,.2f}")
+
+st.divider()
+
+
+# ─── Live Prediction ─────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=300)  # cache for 5 min
+def get_live_prediction():
+    """Fetch latest data and run prediction."""
+    prices = fetch_btc_data(limit=500)
+    low_95, high_95, current_price = predict_range(prices, n_sims=10000)
+    return prices, low_95, high_95, current_price
+
+
+with st.spinner("Fetching live data & running 10,000 simulations..."):
+    prices, low_95, high_95, current_price = get_live_prediction()
+
+# Display current prediction
+st.subheader("Live Prediction")
+c1, c2, c3 = st.columns(3)
+c1.metric("Current BTC Price", f"${current_price:,.2f}")
+c2.metric("Predicted Low (2.5%)", f"${low_95:,.2f}")
+c3.metric("Predicted High (97.5%)", f"${high_95:,.2f}")
+
+width = high_95 - low_95
+st.info(
+    f"**95% Prediction Range:** ${low_95:,.2f} — ${high_95:,.2f}  "
+    f"(width: ${width:,.2f})"
+)
+
+
+# ─── Part C: Persistence ────────────────────────────────────────────────────
+
+def save_prediction(timestamp, current_price, low_95, high_95):
+    """Append prediction to history file."""
+    entry = {
+        "timestamp": str(timestamp),
+        "current_price": float(current_price),
+        "low_95": float(low_95),
+        "high_95": float(high_95),
+        "predicted_at": datetime.utcnow().isoformat()
+    }
+    with open(HISTORY_FILE, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+    return entry
+
+
+def load_history():
+    """Load prediction history and fill in actuals where possible."""
+    if not os.path.exists(HISTORY_FILE):
+        return pd.DataFrame()
+    records = []
+    with open(HISTORY_FILE) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    if not records:
+        return pd.DataFrame()
+    return pd.DataFrame(records)
+
+
+# Save current prediction
+last_bar_time = prices.index[-1]
+save_prediction(last_bar_time, current_price, low_95, high_95)
+
+
+# ─── Chart: Last 50 bars + Prediction Ribbon ────────────────────────────────
+
+st.subheader("Price Chart with Prediction Range")
+
+last_50 = prices.tail(50)
+
+# Run predictions for last 50 bars for the ribbon
+# (simplified: use current model's range as constant ribbon for display)
+# In practice each bar would have its own prediction, but for live display
+# we show the current prediction as a forward-looking shaded area
+
+fig = go.Figure()
+
+# Price line
+fig.add_trace(go.Scatter(
+    x=last_50.index,
+    y=last_50.values,
+    mode='lines+markers',
+    name='BTC Close',
+    line=dict(color='#1f77b4', width=2),
+    marker=dict(size=3)
+))
+
+# Next-hour prediction as a shaded box extending one bar into the future
+next_bar_time = last_50.index[-1] + pd.Timedelta(hours=1)
+
+fig.add_shape(
+    type="rect",
+    x0=last_50.index[-1], x1=next_bar_time,
+    y0=low_95, y1=high_95,
+    fillcolor="rgba(50, 200, 50, 0.2)",
+    line=dict(color="rgba(50, 200, 50, 0.6)", width=1),
+)
+
+fig.add_trace(go.Scatter(
+    x=[next_bar_time, next_bar_time],
+    y=[low_95, high_95],
+    mode='markers+text',
+    marker=dict(size=8, color='green', symbol='diamond'),
+    text=[f'${low_95:,.0f}', f'${high_95:,.0f}'],
+    textposition=['bottom center', 'top center'],
+    name='95% Range',
+    showlegend=True
+))
+
+fig.update_layout(
+    xaxis_title="Time (UTC)",
+    yaxis_title="Price (USD)",
+    height=500,
+    template="plotly_white",
+    hovermode="x unified",
+    yaxis=dict(tickprefix="$", tickformat=",.0f"),
+)
+
+st.plotly_chart(fig, use_container_width=True)
+
+
+# ─── Prediction History (Part C) ────────────────────────────────────────────
+
+history = load_history()
+if not history.empty:
+    st.subheader("Prediction History")
+    st.caption("Predictions are saved on each visit. Actuals fill in as candles close.")
+
+    # Try to fill in actuals from current price data
+    history["timestamp"] = pd.to_datetime(history["timestamp"])
+    history = history.drop_duplicates(subset=["timestamp"], keep="last")
+    history = history.sort_values("timestamp", ascending=False)
+
+    # Match actuals
+    price_dict = prices.to_dict()
+    history["actual"] = history["timestamp"].apply(
+        lambda t: price_dict.get(t, None)
+    )
+    history["hit"] = history.apply(
+        lambda r: "✅" if r["actual"] and r["low_95"] <= r["actual"] <= r["high_95"]
+        else ("❌" if r["actual"] else "⏳"),
+        axis=1
+    )
+
+    display_cols = ["timestamp", "current_price", "low_95", "high_95", "actual", "hit"]
+    st.dataframe(
+        history[display_cols].head(50),
+        use_container_width=True,
+        column_config={
+            "timestamp": "Predicted For",
+            "current_price": st.column_config.NumberColumn("Price at Prediction", format="$%.2f"),
+            "low_95": st.column_config.NumberColumn("Low (2.5%)", format="$%.2f"),
+            "high_95": st.column_config.NumberColumn("High (97.5%)", format="$%.2f"),
+            "actual": st.column_config.NumberColumn("Actual Close", format="$%.2f"),
+            "hit": "Result"
+        }
+    )
+
+st.divider()
+st.caption("Built by Suhaan Raqeeb Khavas | AlphaI × Polaris Build Challenge")
