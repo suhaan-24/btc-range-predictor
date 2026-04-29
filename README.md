@@ -2,6 +2,8 @@
 
 **AlphaI × Polaris Build Challenge**
 
+**Live App:** [btc-range-predictor.streamlit.app](https://btc-range-predictor.streamlit.app/)
+
 Predicts the 95% confidence interval for BTCUSDT's next hourly close using a Geometric Brownian Motion (GBM) simulator with FIGARCH volatility modeling and Student-t fat-tailed innovations.
 
 ## Project Structure
