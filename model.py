@@ -113,20 +113,19 @@ def simulate_cyber_gbm(S0, mu, sigma_fig, H, M, params, bar_sigma2,
     return S
 
 
-def predict_range(prices, n_sims=10000):
+def predict_range(prices, n_sims=10000, pct_lo=5.0, pct_hi=95.0):
     """
     Given a Series of close prices (at least ~100 bars),
-    predict the 95% confidence interval for the next bar's close.
-    Returns (low_95, high_95, current_price).
+    predict the prediction interval for the next bar's close.
+    Returns (low, high, current_price, sigma_fig).
     """
     log_ret = np.log(prices / prices.shift(1)).dropna()
     mu = log_ret.mean()
     S0 = prices.iloc[-1]
+    eps = 1e-6
 
-    # Fit volatility model
     sigma_fig, resid, nu, _ = fit_model(log_ret)
 
-    # Compute indicators
     H_series = rolling_entropy(resid)
     M_series = log_ret.abs().rolling(60).mean()
     bar_sigma2 = (sigma_fig**2).mean()
@@ -135,9 +134,8 @@ def predict_range(prices, n_sims=10000):
     )
     info_filter = (H_series > H_series.mean()).astype(float)
 
-    # Calibrate params
-    H_max = H_series.max()
-    M_max = M_series.max()
+    H_max = H_series.max() if H_series.max() > 0 else 1.0
+    M_max = M_series.max() if M_series.max() > 0 else 1.0
     alpha0, delta0 = 0.5, 0.3
     if alpha0 * H_max + delta0 * M_max >= 1:
         fac = 0.95 / (alpha0 * H_max + delta0 * M_max)
@@ -148,20 +146,26 @@ def predict_range(prices, n_sims=10000):
         'gamma': 0.2, 'kappa': 0.1, 'eta': 1e-3
     }
 
-    # Get latest indicator values
     redundancy_val = redundancy.iloc[-1]
     info_filter_val = info_filter.iloc[-1]
+    H_val = min(H_series.iloc[-1] / H_max, 1.0)
+    M_val = min(M_series.iloc[-1] / M_max, 1.0)
+    crisis = (H_val > 0.8) or (M_val > 0.8)
+    delta_t = base_params['delta'] if crisis else 0.0
 
-    # Monte Carlo
-    finals = np.zeros(n_sims)
-    for i in range(n_sims):
-        path = simulate_cyber_gbm(
-            S0, mu, sigma_fig, H_series, M_series,
-            base_params.copy(), bar_sigma2,
-            redundancy_val, info_filter_val, nu,
-            n_steps=1, dt=1
-        )
-        finals[i] = path[1]
+    sig_last = sigma_fig.iloc[-1]
+    sigma2_init = sig_last ** 2
+    sigma2 = (
+        sig_last**2 * (1 + base_params['alpha'] * H_val + delta_t * M_val)
+        + base_params['gamma'] * (bar_sigma2 - sigma2_init)
+    )
+    sigma2 *= max(1e-12, redundancy_val)
+    sigma2 *= 1 + 0.5 * info_filter_val
+    sigma2 = max(eps, min(sigma2, 0.5))
 
-    low_95, high_95 = np.percentile(finals, [2.5, 97.5])
-    return low_95, high_95, S0
+    # Vectorized Monte Carlo: sigma2 is deterministic per step, only Z varies
+    Z = np.random.standard_t(nu, size=n_sims) * np.sqrt((nu - 2) / nu)
+    finals = S0 * np.exp((mu - 0.5 * sigma2) + np.sqrt(sigma2) * Z)
+
+    low_95, high_95 = np.percentile(finals, [pct_lo, pct_hi])
+    return low_95, high_95, S0, sigma_fig

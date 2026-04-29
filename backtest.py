@@ -7,7 +7,7 @@ import json
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-from model import fetch_btc_data, fit_model, rolling_entropy, simulate_cyber_gbm
+from model import fetch_btc_data, fit_model, rolling_entropy
 
 
 def run_backtest(lookback=500, n_sims=10000):
@@ -76,19 +76,27 @@ def run_backtest(lookback=500, n_sims=10000):
 
             redundancy_val = redundancy.iloc[-1]
             info_filter_val = info_filter.iloc[-1]
+            H_val = min(H_series.iloc[-1] / H_max, 1.0) if H_max > 0 else 0.0
+            M_val = min(M_series.iloc[-1] / M_max, 1.0) if M_max > 0 else 0.0
+            crisis = (H_val > 0.8) or (M_val > 0.8)
+            delta_t = base_params['delta'] if crisis else 0.0
 
-            # Monte Carlo simulation
-            finals = np.zeros(n_sims)
-            for j in range(n_sims):
-                path = simulate_cyber_gbm(
-                    S0, mu, sigma_fig, H_series, M_series,
-                    base_params.copy(), bar_sigma2,
-                    redundancy_val, info_filter_val, nu,
-                    n_steps=1, dt=1
-                )
-                finals[j] = path[1]
+            sig_last = sigma_fig.iloc[-1]
+            sigma2_init = sig_last ** 2
+            eps = 1e-6
+            sigma2 = (
+                sig_last**2 * (1 + base_params['alpha'] * H_val + delta_t * M_val)
+                + base_params['gamma'] * (bar_sigma2 - sigma2_init)
+            )
+            sigma2 *= max(1e-12, redundancy_val)
+            sigma2 *= 1 + 0.5 * info_filter_val
+            sigma2 = max(eps, min(sigma2, 0.5))
 
-            low_95, high_95 = np.percentile(finals, [2.5, 97.5])
+            # Vectorized Monte Carlo: sigma2 is deterministic, only Z varies
+            Z = np.random.standard_t(nu, size=n_sims) * np.sqrt((nu - 2) / nu)
+            finals = S0 * np.exp((mu - 0.5 * sigma2) + np.sqrt(sigma2) * Z)
+
+            low_95, high_95 = np.percentile(finals, [5.0, 95.0])
 
         except Exception as e:
             # Fallback: simple percentile-based range

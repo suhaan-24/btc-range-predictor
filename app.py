@@ -53,12 +53,12 @@ st.divider()
 def get_live_prediction():
     """Fetch latest data and run prediction."""
     prices = fetch_btc_data(limit=500)
-    low_95, high_95, current_price = predict_range(prices, n_sims=10000)
-    return prices, low_95, high_95, current_price
+    low_95, high_95, current_price, sigma_fig = predict_range(prices, n_sims=10000)
+    return prices, low_95, high_95, current_price, sigma_fig
 
 
 with st.spinner("Fetching live data & running 10,000 simulations..."):
-    prices, low_95, high_95, current_price = get_live_prediction()
+    prices, low_95, high_95, current_price, sigma_fig = get_live_prediction()
 
 # Display current prediction
 st.subheader("Live Prediction")
@@ -116,14 +116,40 @@ st.subheader("Price Chart with Prediction Range")
 
 last_50 = prices.tail(50)
 
-# Run predictions for last 50 bars for the ribbon
-# (simplified: use current model's range as constant ribbon for display)
-# In practice each bar would have its own prediction, but for live display
-# we show the current prediction as a forward-looking shaded area
+# Build historical ribbon: for each of last 50 bars at time t,
+# show the predicted band based on price and FIGARCH sigma at t-1.
+n_ribbon = min(50, len(sigma_fig))
+ribbon_times = prices.index[-n_ribbon:]
+prev_prices = prices.iloc[-n_ribbon - 1:-1].values
+ribbon_sigma = sigma_fig.iloc[-n_ribbon:].values
+ribbon_low = prev_prices * np.exp(-1.96 * ribbon_sigma)
+ribbon_high = prev_prices * np.exp(1.96 * ribbon_sigma)
 
 fig = go.Figure()
 
-# Price line
+# Historical ribbon (upper bound, then lower filled)
+fig.add_trace(go.Scatter(
+    x=ribbon_times,
+    y=ribbon_high,
+    mode='lines',
+    line=dict(width=0),
+    name='95% Band',
+    showlegend=True,
+    hoverinfo='skip',
+))
+fig.add_trace(go.Scatter(
+    x=ribbon_times,
+    y=ribbon_low,
+    mode='lines',
+    fill='tonexty',
+    fillcolor='rgba(255, 165, 0, 0.18)',
+    line=dict(width=0),
+    name='95% Band',
+    showlegend=False,
+    hoverinfo='skip',
+))
+
+# Price line (drawn on top of ribbon)
 fig.add_trace(go.Scatter(
     x=last_50.index,
     y=last_50.values,
@@ -151,7 +177,7 @@ fig.add_trace(go.Scatter(
     marker=dict(size=8, color='green', symbol='diamond'),
     text=[f'${low_95:,.0f}', f'${high_95:,.0f}'],
     textposition=['bottom center', 'top center'],
-    name='95% Range',
+    name='Next-Hour Range',
     showlegend=True
 ))
 
