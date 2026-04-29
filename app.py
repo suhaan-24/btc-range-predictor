@@ -104,7 +104,8 @@ def fmt(usd_value):
 METRICS_FILE = "backtest_metrics.json"
 HISTORY_FILE = "prediction_history.jsonl"
 
-if os.path.exists(METRICS_FILE):
+_metrics_available = os.path.exists(METRICS_FILE)
+if _metrics_available:
     with open(METRICS_FILE) as f:
         metrics = json.load(f)
 else:
@@ -113,10 +114,12 @@ else:
 # ─── Backtest Metrics Row ────────────────────────────────────────────────────
 
 st.subheader("Backtest Performance (30-day)")
+if not _metrics_available:
+    st.warning("Backtest metrics not found. Run `python backtest.py` locally and commit `backtest_metrics.json` to see results.")
 col1, col2, col3 = st.columns(3)
-col1.metric("Coverage (95%)", f"{metrics['coverage_95']:.2%}")
-col2.metric("Avg Width", fmt(metrics['avg_width_95']))
-col3.metric("Mean Winkler", fmt(metrics['mean_winkler_95']))
+col1.metric("Coverage (95%)", f"{metrics['coverage_95']:.2%}" if _metrics_available else "—")
+col2.metric("Avg Width", fmt(metrics['avg_width_95']) if _metrics_available else "—")
+col3.metric("Mean Winkler", fmt(metrics['mean_winkler_95']) if _metrics_available else "—")
 
 st.divider()
 

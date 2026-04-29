@@ -12,3 +12,5 @@ build/
 *.jsonl
 backtest_metrics.json
 .streamlit/secrets.toml
+.devcontainer/
+.python-version
