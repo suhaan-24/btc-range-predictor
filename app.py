@@ -37,6 +37,21 @@ CURRENCIES = {
     "BRL": ("R$",  "Brazilian Real"),
 }
 
+TIMEZONES = {
+    "IST":  ("Asia/Kolkata",        "India Standard Time"),
+    "UTC":  ("UTC",                 "UTC"),
+    "EST":  ("America/New_York",    "US Eastern"),
+    "CST":  ("America/Chicago",     "US Central"),
+    "PST":  ("America/Los_Angeles", "US Pacific"),
+    "GMT":  ("Europe/London",       "London / GMT"),
+    "CET":  ("Europe/Paris",        "Central European"),
+    "GST":  ("Asia/Dubai",          "Gulf Standard Time"),
+    "SGT":  ("Asia/Singapore",      "Singapore"),
+    "JST":  ("Asia/Tokyo",          "Japan Standard Time"),
+    "HKT":  ("Asia/Hong_Kong",      "Hong Kong"),
+    "AEST": ("Australia/Sydney",    "Australia Eastern"),
+}
+
 
 @st.cache_data(ttl=3600)
 def fetch_exchange_rates():
@@ -51,23 +66,32 @@ def fetch_exchange_rates():
 
 rates = fetch_exchange_rates()
 
-# ─── Title row with currency selector top-right ──────────────────────────────
+# ─── Title row with dropdowns top-right ─────────────────────────────────────
 
-_title_col, _curr_col = st.columns([3, 1])
+_title_col, _curr_col, _tz_col = st.columns([3, 1, 1])
 with _title_col:
     st.title("₿ Bitcoin Next-Hour Range Predictor")
     st.caption("GBM Monte Carlo model — BTCUSDT 1h candles via Binance")
 with _curr_col:
-    st.markdown("<br>", unsafe_allow_html=True)  # nudge dropdown down to align with title
+    st.markdown("<br>", unsafe_allow_html=True)
     selected_currency = st.selectbox(
         "Currency",
         options=list(CURRENCIES.keys()),
         format_func=lambda c: f"{c} — {CURRENCIES[c][1]}",
         index=0,
     )
+with _tz_col:
+    st.markdown("<br>", unsafe_allow_html=True)
+    selected_tz_key = st.selectbox(
+        "Timezone",
+        options=list(TIMEZONES.keys()),
+        format_func=lambda z: f"{z} — {TIMEZONES[z][1]}",
+        index=0,
+    )
 
 curr_symbol, curr_name = CURRENCIES[selected_currency]
 fx_rate = rates.get(selected_currency, 1.0)
+tz_name, tz_label = TIMEZONES[selected_tz_key]
 
 
 def fmt(usd_value):
@@ -112,7 +136,7 @@ with st.spinner("Fetching live data & running 10,000 simulations..."):
 
 # Keep UTC timestamp for history file, then convert index to IST for display
 _utc_last_bar = prices.index[-1]
-prices.index = prices.index.tz_localize('UTC').tz_convert('Asia/Kolkata')
+prices.index = prices.index.tz_localize('UTC').tz_convert(tz_name)
 
 # Display current prediction
 st.subheader("Live Prediction")
@@ -235,7 +259,7 @@ fig.add_trace(go.Scatter(
 ))
 
 fig.update_layout(
-    xaxis_title="Time (IST)",
+    xaxis_title=f"Time ({selected_tz_key})",
     yaxis_title=f"Price ({selected_currency})",
     height=500,
     template="plotly_white",
@@ -257,7 +281,7 @@ if not history.empty:
     history["timestamp"] = (
         pd.to_datetime(history["timestamp"])
         .dt.tz_localize('UTC', ambiguous='infer', nonexistent='shift_forward')
-        .dt.tz_convert('Asia/Kolkata')
+        .dt.tz_convert(tz_name)
     )
     history = history.drop_duplicates(subset=["timestamp"], keep="last")
     history = history.sort_values("timestamp", ascending=False)
@@ -282,7 +306,7 @@ if not history.empty:
         hist_display.head(50),
         use_container_width=True,
         column_config={
-            "timestamp": "Predicted For (IST)",
+            "timestamp": f"Predicted For ({selected_tz_key})",
             "current_price": st.column_config.NumberColumn(f"Price at Prediction ({selected_currency})", format=price_fmt),
             "low_95": st.column_config.NumberColumn(f"Low 5% ({selected_currency})", format=price_fmt),
             "high_95": st.column_config.NumberColumn(f"High 95% ({selected_currency})", format=price_fmt),
