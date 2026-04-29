@@ -168,4 +168,4 @@ def predict_range(prices, n_sims=10000, pct_lo=5.0, pct_hi=95.0):
     finals = S0 * np.exp((mu - 0.5 * sigma2) + np.sqrt(sigma2) * Z)
 
     low_95, high_95 = np.percentile(finals, [pct_lo, pct_hi])
-    return low_95, high_95, S0, sigma_fig
+    return low_95, high_95, S0, sigma_fig, finals

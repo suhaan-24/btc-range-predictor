@@ -66,7 +66,7 @@ def fetch_exchange_rates():
 
 rates = fetch_exchange_rates()
 
-# ─── Title row with dropdowns top-right ─────────────────────────────────────
+# ─── Title row with dropdowns top-right ──────────────────────────────────────
 
 _title_col, _curr_col, _tz_col = st.columns([3, 1, 1])
 with _title_col:
@@ -90,7 +90,7 @@ with _tz_col:
     )
 
 curr_symbol, curr_name = CURRENCIES[selected_currency]
-fx_rate = rates.get(selected_currency, 1.0)
+fx_rate   = rates.get(selected_currency, 1.0)
 tz_name, tz_label = TIMEZONES[selected_tz_key]
 
 
@@ -127,18 +127,56 @@ st.divider()
 def get_live_prediction():
     """Fetch latest data and run prediction."""
     prices = fetch_btc_data(limit=500)
-    low_95, high_95, current_price, sigma_fig = predict_range(prices, n_sims=10000)
-    return prices, low_95, high_95, current_price, sigma_fig
+    low_95, high_95, current_price, sigma_fig, finals = predict_range(prices, n_sims=10000)
+    return prices, low_95, high_95, current_price, sigma_fig, finals
 
 
 with st.spinner("Fetching live data & running 10,000 simulations..."):
-    prices, low_95, high_95, current_price, sigma_fig = get_live_prediction()
+    prices, low_95, high_95, current_price, sigma_fig, finals = get_live_prediction()
 
-# Keep UTC timestamp for history file, then convert index to IST for display
+# Keep UTC timestamp for history file, then convert index to selected tz
 _utc_last_bar = prices.index[-1]
 prices.index = prices.index.tz_localize('UTC').tz_convert(tz_name)
 
-# Display current prediction
+# ─── Sidebar: Price Alert ────────────────────────────────────────────────────
+
+st.sidebar.header("Price Alert")
+_alert_step = float(max(1.0, round(current_price * fx_rate / 200)))
+alert_input = st.sidebar.number_input(
+    f"Alert Price Level ({selected_currency})",
+    min_value=0.0,
+    value=0.0,
+    step=_alert_step,
+    format="%.2f",
+    help="Enter a price to check whether it falls inside the predicted range.",
+)
+
+# ─── Volatility confidence computations ──────────────────────────────────────
+
+log_ret = np.log(prices / prices.shift(1)).dropna()
+recent_vol     = float(log_ret.tail(24).std())
+full_roll_std  = log_ret.rolling(24).std().dropna()
+p30 = float(np.percentile(full_roll_std, 30))
+p70 = float(np.percentile(full_roll_std, 70))
+
+if recent_vol < p30:
+    conf_badge   = "🟢 High Confidence"
+    conf_msg     = "Recent volatility is low — model predictions are more reliable."
+    conf_fn      = st.success
+    regime_label = "Calm"
+elif recent_vol < p70:
+    conf_badge   = "🟡 Medium Confidence"
+    conf_msg     = "Recent volatility is moderate — predictions carry typical uncertainty."
+    conf_fn      = st.warning
+    regime_label = "Normal"
+else:
+    conf_badge   = "🔴 Low Confidence"
+    conf_msg     = "Recent volatility is high — prediction intervals are wider and less reliable."
+    conf_fn      = st.error
+    regime_label = "Volatile"
+
+# ─── Live Prediction Metrics ─────────────────────────────────────────────────
+
 st.subheader("Live Prediction")
 c1, c2, c3 = st.columns(3)
 c1.metric("Current BTC Price", fmt(current_price))
@@ -151,8 +189,33 @@ st.info(
     f"(width: {fmt(width)})"
 )
 
+# ─── Model Confidence Indicator ──────────────────────────────────────────────
 
-# ─── Part C: Persistence ────────────────────────────────────────────────────
+conf_fn(f"**Model Confidence: {conf_badge}** — {conf_msg}")
+
+# ─── Alert Threshold Display ─────────────────────────────────────────────────
+
+if alert_input > 0:
+    alert_usd = alert_input / fx_rate
+    alert_str = f"{curr_symbol}{alert_input:,.2f}"
+    if alert_usd < low_95:
+        st.warning(
+            f"⚠️ **{alert_str}** is **BELOW** your predicted range "
+            f"({fmt(low_95)} – {fmt(high_95)}) — less than 5% chance of reaching this level."
+        )
+    elif alert_usd > high_95:
+        st.warning(
+            f"⚠️ **{alert_str}** is **ABOVE** your predicted range "
+            f"({fmt(low_95)} – {fmt(high_95)}) — less than 5% chance of reaching this level."
+        )
+    else:
+        st.success(
+            f"✅ **{alert_str}** falls **WITHIN** your predicted range "
+            f"({fmt(low_95)} – {fmt(high_95)})."
+        )
+
+
+# ─── Part C: Persistence ─────────────────────────────────────────────────────
 
 def save_prediction(timestamp, current_price, low_95, high_95):
     """Append prediction to history file."""
@@ -183,62 +246,44 @@ def load_history():
     return pd.DataFrame(records)
 
 
-# Save current prediction (store UTC timestamp in history file)
+# Save current prediction (UTC timestamp stored in file)
 save_prediction(_utc_last_bar, current_price, low_95, high_95)
 
 
-# ─── Chart: Last 50 bars + Prediction Ribbon ────────────────────────────────
+# ─── Chart: Last 50 bars + Prediction Ribbon ─────────────────────────────────
 
 st.subheader("Price Chart with Prediction Range")
 
 last_50 = prices.tail(50)
 
-# Build historical ribbon: for each of last 50 bars at time t,
-# show the predicted band based on price and FIGARCH sigma at t-1.
-n_ribbon = min(50, len(sigma_fig))
-ribbon_times = prices.index[-n_ribbon:]
-prev_prices = prices.iloc[-n_ribbon - 1:-1].values
-ribbon_sigma = sigma_fig.iloc[-n_ribbon:].values
-ribbon_low = prev_prices * np.exp(-1.96 * ribbon_sigma) * fx_rate
-ribbon_high = prev_prices * np.exp(1.96 * ribbon_sigma) * fx_rate
+# Historical ribbon: for each bar t, band is [prev_price * exp(±1.96 * sigma_t)]
+n_ribbon       = min(50, len(sigma_fig))
+ribbon_times   = prices.index[-n_ribbon:]
+prev_prices_arr = prices.iloc[-n_ribbon - 1:-1].values
+ribbon_sigma   = sigma_fig.iloc[-n_ribbon:].values
+ribbon_low     = prev_prices_arr * np.exp(-1.96 * ribbon_sigma) * fx_rate
+ribbon_high    = prev_prices_arr * np.exp( 1.96 * ribbon_sigma) * fx_rate
 
 fig = go.Figure()
 
-# Historical ribbon (upper bound, then lower filled)
 fig.add_trace(go.Scatter(
-    x=ribbon_times,
-    y=ribbon_high,
-    mode='lines',
-    line=dict(width=0),
-    name='95% Band',
-    showlegend=True,
-    hoverinfo='skip',
+    x=ribbon_times, y=ribbon_high,
+    mode='lines', line=dict(width=0),
+    name='95% Band', showlegend=True, hoverinfo='skip',
 ))
 fig.add_trace(go.Scatter(
-    x=ribbon_times,
-    y=ribbon_low,
-    mode='lines',
-    fill='tonexty',
+    x=ribbon_times, y=ribbon_low,
+    mode='lines', fill='tonexty',
     fillcolor='rgba(255, 165, 0, 0.18)',
-    line=dict(width=0),
-    name='95% Band',
-    showlegend=False,
-    hoverinfo='skip',
+    line=dict(width=0), name='95% Band', showlegend=False, hoverinfo='skip',
 ))
-
-# Price line (drawn on top of ribbon)
 fig.add_trace(go.Scatter(
-    x=last_50.index,
-    y=last_50.values * fx_rate,
-    mode='lines+markers',
-    name='BTC Close',
-    line=dict(color='#1f77b4', width=2),
-    marker=dict(size=3)
+    x=last_50.index, y=last_50.values * fx_rate,
+    mode='lines+markers', name='BTC Close',
+    line=dict(color='#1f77b4', width=2), marker=dict(size=3),
 ))
 
-# Next-hour prediction as a shaded box extending one bar into the future
 next_bar_time = last_50.index[-1] + pd.Timedelta(hours=1)
-
 fig.add_shape(
     type="rect",
     x0=last_50.index[-1], x1=next_bar_time,
@@ -246,7 +291,6 @@ fig.add_shape(
     fillcolor="rgba(50, 200, 50, 0.2)",
     line=dict(color="rgba(50, 200, 50, 0.6)", width=1),
 )
-
 fig.add_trace(go.Scatter(
     x=[next_bar_time, next_bar_time],
     y=[low_95 * fx_rate, high_95 * fx_rate],
@@ -254,30 +298,90 @@ fig.add_trace(go.Scatter(
     marker=dict(size=8, color='green', symbol='diamond'),
     text=[fmt(low_95), fmt(high_95)],
     textposition=['bottom center', 'top center'],
-    name='Next-Hour Range',
-    showlegend=True
+    name='Next-Hour Range', showlegend=True,
 ))
 
 fig.update_layout(
     xaxis_title=f"Time ({selected_tz_key})",
     yaxis_title=f"Price ({selected_currency})",
-    height=500,
-    template="plotly_white",
-    hovermode="x unified",
+    height=500, template="plotly_white", hovermode="x unified",
     yaxis=dict(tickprefix=curr_symbol, tickformat=",.0f"),
 )
-
 st.plotly_chart(fig, use_container_width=True)
 
 
-# ─── Prediction History (Part C) ────────────────────────────────────────────
+# ─── Distribution Plot ────────────────────────────────────────────────────────
+
+st.subheader("Simulated Next-Hour Price Distribution")
+
+finals_conv = finals * fx_rate
+fig_dist = go.Figure()
+fig_dist.add_trace(go.Histogram(
+    x=finals_conv, nbinsx=100, name="Simulated prices",
+    marker_color='rgba(31, 119, 180, 0.5)',
+    marker_line=dict(color='rgba(31, 119, 180, 0.8)', width=0.5),
+))
+fig_dist.add_vline(
+    x=low_95 * fx_rate, line_dash="dash", line_color="red", line_width=2,
+    annotation_text=f"5th pct: {fmt(low_95)}", annotation_position="top right",
+)
+fig_dist.add_vline(
+    x=high_95 * fx_rate, line_dash="dash", line_color="red", line_width=2,
+    annotation_text=f"95th pct: {fmt(high_95)}", annotation_position="top left",
+)
+fig_dist.add_vline(
+    x=current_price * fx_rate, line_dash="solid", line_color="black", line_width=2,
+    annotation_text=f"Current: {fmt(current_price)}", annotation_position="top right",
+)
+fig_dist.update_layout(
+    xaxis_title=f"Simulated Close Price ({selected_currency})",
+    yaxis_title="Frequency",
+    height=350, template="plotly_white", showlegend=False,
+    xaxis=dict(tickprefix=curr_symbol, tickformat=",.0f"),
+)
+st.plotly_chart(fig_dist, use_container_width=True)
+
+
+# ─── Volatility Regime ────────────────────────────────────────────────────────
+
+st.subheader(f"Volatility Regime — Current: **{regime_label}**")
+
+roll_vol_pct = log_ret.rolling(24).std().tail(50) * 100
+p30_pct = p30 * 100
+p70_pct = p70 * 100
+
+fig_vol = go.Figure()
+fig_vol.add_trace(go.Scatter(
+    x=roll_vol_pct.index, y=roll_vol_pct.values,
+    mode='lines', name='24h Rolling Vol (%)',
+    line=dict(color='#e377c2', width=2),
+    fill='tozeroy', fillcolor='rgba(227, 119, 194, 0.12)',
+))
+fig_vol.add_hline(
+    y=p30_pct, line_dash="dot", line_color="green", line_width=1.5,
+    annotation_text="30th pct — Calm threshold", annotation_position="bottom right",
+)
+fig_vol.add_hline(
+    y=p70_pct, line_dash="dot", line_color="red", line_width=1.5,
+    annotation_text="70th pct — Volatile threshold", annotation_position="top right",
+)
+fig_vol.update_layout(
+    xaxis_title=f"Time ({selected_tz_key})",
+    yaxis_title="Hourly Volatility (%)",
+    height=300, template="plotly_white",
+    yaxis=dict(ticksuffix="%"),
+)
+st.plotly_chart(fig_vol, use_container_width=True)
+
+
+# ─── Prediction History (Part C) ─────────────────────────────────────────────
 
 history = load_history()
 if not history.empty:
     st.subheader("Prediction History")
     st.caption("Predictions are saved on each visit. Actuals fill in as candles close.")
 
-    # Convert history timestamps from UTC to IST for display and matching
+    # Convert timestamps to selected tz for display and matching
     history["timestamp"] = (
         pd.to_datetime(history["timestamp"])
         .dt.tz_localize('UTC', ambiguous='infer', nonexistent='shift_forward')
@@ -286,20 +390,31 @@ if not history.empty:
     history = history.drop_duplicates(subset=["timestamp"], keep="last")
     history = history.sort_values("timestamp", ascending=False)
 
-    # Match actuals (both prices.index and history timestamps are now IST)
     price_dict = prices.to_dict()
-    history["actual"] = history["timestamp"].apply(
-        lambda t: price_dict.get(t, None)
-    )
+    history["actual"] = history["timestamp"].apply(lambda t: price_dict.get(t, None))
     history["hit"] = history.apply(
         lambda r: "✅" if r["actual"] and r["low_95"] <= r["actual"] <= r["high_95"]
         else ("❌" if r["actual"] else "⏳"),
         axis=1
     )
 
+    # ─── Accuracy Tracker ────────────────────────────────────────────────────
+
+    resolved = history[history["actual"].notna()]
+    if not resolved.empty:
+        n_total = len(resolved)
+        n_hits  = int((resolved["hit"] == "✅").sum())
+        acc_pct = n_hits / n_total * 100
+        a1, a2, a3 = st.columns(3)
+        a1.metric("Predictions with Actuals", n_total)
+        a2.metric("Hits", f"{n_hits} / {n_total}")
+        a3.metric("Live Accuracy", f"{acc_pct:.1f}%")
+
+    # ─── History Table ────────────────────────────────────────────────────────
+
     hist_display = history[["timestamp", "current_price", "low_95", "high_95", "actual", "hit"]].copy()
     for col in ["current_price", "low_95", "high_95", "actual"]:
-        hist_display[col] = hist_display[col] * fx_rate
+        hist_display[col] = pd.to_numeric(hist_display[col], errors='coerce') * fx_rate
 
     price_fmt = f"{curr_symbol}%.2f"
     st.dataframe(
