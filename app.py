@@ -125,9 +125,14 @@ st.divider()
 
 @st.cache_data(ttl=300)  # cache for 5 min
 def get_live_prediction():
-    """Fetch latest data and run prediction."""
+    """Fetch latest data and run prediction. Returns 6-tuple (defensive against stale model.py)."""
     prices = fetch_btc_data(limit=500)
-    low_95, high_95, current_price, sigma_fig, finals = predict_range(prices, n_sims=10000)
+    result = predict_range(prices, n_sims=10000)
+    if len(result) >= 5:
+        low_95, high_95, current_price, sigma_fig, finals = result[:5]
+    else:
+        low_95, high_95, current_price, sigma_fig = result[:4]
+        finals = None
     return prices, low_95, high_95, current_price, sigma_fig, finals
 
 
@@ -313,6 +318,10 @@ st.plotly_chart(fig, use_container_width=True)
 # ─── Distribution Plot ────────────────────────────────────────────────────────
 
 st.subheader("Simulated Next-Hour Price Distribution")
+
+if finals is None:
+    st.warning("Distribution data unavailable — using a fallback prediction. Reload after the next deploy completes.")
+    finals = np.random.normal((low_95 + high_95) / 2, (high_95 - low_95) / 4, 10000)
 
 finals_conv = finals * fx_rate
 fig_dist = go.Figure()
