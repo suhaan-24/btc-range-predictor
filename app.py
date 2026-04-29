@@ -5,6 +5,7 @@ Streamlit app that shows live predictions and stores history.
 
 import json
 import os
+import requests
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -21,8 +22,57 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("₿ Bitcoin Next-Hour Range Predictor")
-st.caption("GBM Monte Carlo model — BTCUSDT 1h candles via Binance")
+CURRENCIES = {
+    "USD": ("$",   "US Dollar"),
+    "INR": ("₹",   "Indian Rupee"),
+    "EUR": ("€",   "Euro"),
+    "GBP": ("£",   "British Pound"),
+    "JPY": ("¥",   "Japanese Yen"),
+    "AUD": ("A$",  "Australian Dollar"),
+    "CAD": ("C$",  "Canadian Dollar"),
+    "SGD": ("S$",  "Singapore Dollar"),
+    "AED": ("د.إ", "UAE Dirham"),
+    "CHF": ("Fr",  "Swiss Franc"),
+    "KRW": ("₩",   "South Korean Won"),
+    "BRL": ("R$",  "Brazilian Real"),
+}
+
+
+@st.cache_data(ttl=3600)
+def fetch_exchange_rates():
+    """Fetch USD-based exchange rates from open.er-api.com (free, no key)."""
+    try:
+        r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=10)
+        r.raise_for_status()
+        return r.json()["rates"]
+    except Exception:
+        return {"USD": 1.0}
+
+
+rates = fetch_exchange_rates()
+
+# ─── Title row with currency selector top-right ──────────────────────────────
+
+_title_col, _curr_col = st.columns([3, 1])
+with _title_col:
+    st.title("₿ Bitcoin Next-Hour Range Predictor")
+    st.caption("GBM Monte Carlo model — BTCUSDT 1h candles via Binance")
+with _curr_col:
+    st.markdown("<br>", unsafe_allow_html=True)  # nudge dropdown down to align with title
+    selected_currency = st.selectbox(
+        "Currency",
+        options=list(CURRENCIES.keys()),
+        format_func=lambda c: f"{c} — {CURRENCIES[c][1]}",
+        index=0,
+    )
+
+curr_symbol, curr_name = CURRENCIES[selected_currency]
+fx_rate = rates.get(selected_currency, 1.0)
+
+
+def fmt(usd_value):
+    """Format a USD value in the selected currency."""
+    return f"{curr_symbol}{usd_value * fx_rate:,.2f}"
 
 
 # ─── Load Backtest Metrics ───────────────────────────────────────────────────
@@ -41,8 +91,8 @@ else:
 st.subheader("Backtest Performance (30-day)")
 col1, col2, col3 = st.columns(3)
 col1.metric("Coverage (95%)", f"{metrics['coverage_95']:.2%}")
-col2.metric("Avg Width", f"${metrics['avg_width_95']:,.2f}")
-col3.metric("Mean Winkler", f"${metrics['mean_winkler_95']:,.2f}")
+col2.metric("Avg Width", fmt(metrics['avg_width_95']))
+col3.metric("Mean Winkler", fmt(metrics['mean_winkler_95']))
 
 st.divider()
 
@@ -67,14 +117,14 @@ prices.index = prices.index.tz_localize('UTC').tz_convert('Asia/Kolkata')
 # Display current prediction
 st.subheader("Live Prediction")
 c1, c2, c3 = st.columns(3)
-c1.metric("Current BTC Price", f"${current_price:,.2f}")
-c2.metric("Predicted Low (2.5%)", f"${low_95:,.2f}")
-c3.metric("Predicted High (97.5%)", f"${high_95:,.2f}")
+c1.metric("Current BTC Price", fmt(current_price))
+c2.metric("Predicted Low (5%)", fmt(low_95))
+c3.metric("Predicted High (95%)", fmt(high_95))
 
 width = high_95 - low_95
 st.info(
-    f"**95% Prediction Range:** ${low_95:,.2f} — ${high_95:,.2f}  "
-    f"(width: ${width:,.2f})"
+    f"**90% Prediction Range ({curr_name}):** {fmt(low_95)} — {fmt(high_95)}  "
+    f"(width: {fmt(width)})"
 )
 
 
@@ -125,8 +175,8 @@ n_ribbon = min(50, len(sigma_fig))
 ribbon_times = prices.index[-n_ribbon:]
 prev_prices = prices.iloc[-n_ribbon - 1:-1].values
 ribbon_sigma = sigma_fig.iloc[-n_ribbon:].values
-ribbon_low = prev_prices * np.exp(-1.96 * ribbon_sigma)
-ribbon_high = prev_prices * np.exp(1.96 * ribbon_sigma)
+ribbon_low = prev_prices * np.exp(-1.96 * ribbon_sigma) * fx_rate
+ribbon_high = prev_prices * np.exp(1.96 * ribbon_sigma) * fx_rate
 
 fig = go.Figure()
 
@@ -155,7 +205,7 @@ fig.add_trace(go.Scatter(
 # Price line (drawn on top of ribbon)
 fig.add_trace(go.Scatter(
     x=last_50.index,
-    y=last_50.values,
+    y=last_50.values * fx_rate,
     mode='lines+markers',
     name='BTC Close',
     line=dict(color='#1f77b4', width=2),
@@ -168,17 +218,17 @@ next_bar_time = last_50.index[-1] + pd.Timedelta(hours=1)
 fig.add_shape(
     type="rect",
     x0=last_50.index[-1], x1=next_bar_time,
-    y0=low_95, y1=high_95,
+    y0=low_95 * fx_rate, y1=high_95 * fx_rate,
     fillcolor="rgba(50, 200, 50, 0.2)",
     line=dict(color="rgba(50, 200, 50, 0.6)", width=1),
 )
 
 fig.add_trace(go.Scatter(
     x=[next_bar_time, next_bar_time],
-    y=[low_95, high_95],
+    y=[low_95 * fx_rate, high_95 * fx_rate],
     mode='markers+text',
     marker=dict(size=8, color='green', symbol='diamond'),
-    text=[f'${low_95:,.0f}', f'${high_95:,.0f}'],
+    text=[fmt(low_95), fmt(high_95)],
     textposition=['bottom center', 'top center'],
     name='Next-Hour Range',
     showlegend=True
@@ -186,11 +236,11 @@ fig.add_trace(go.Scatter(
 
 fig.update_layout(
     xaxis_title="Time (IST)",
-    yaxis_title="Price (USD)",
+    yaxis_title=f"Price ({selected_currency})",
     height=500,
     template="plotly_white",
     hovermode="x unified",
-    yaxis=dict(tickprefix="$", tickformat=",.0f"),
+    yaxis=dict(tickprefix=curr_symbol, tickformat=",.0f"),
 )
 
 st.plotly_chart(fig, use_container_width=True)
@@ -223,16 +273,20 @@ if not history.empty:
         axis=1
     )
 
-    display_cols = ["timestamp", "current_price", "low_95", "high_95", "actual", "hit"]
+    hist_display = history[["timestamp", "current_price", "low_95", "high_95", "actual", "hit"]].copy()
+    for col in ["current_price", "low_95", "high_95", "actual"]:
+        hist_display[col] = hist_display[col] * fx_rate
+
+    price_fmt = f"{curr_symbol}%.2f"
     st.dataframe(
-        history[display_cols].head(50),
+        hist_display.head(50),
         use_container_width=True,
         column_config={
             "timestamp": "Predicted For (IST)",
-            "current_price": st.column_config.NumberColumn("Price at Prediction", format="$%.2f"),
-            "low_95": st.column_config.NumberColumn("Low (2.5%)", format="$%.2f"),
-            "high_95": st.column_config.NumberColumn("High (97.5%)", format="$%.2f"),
-            "actual": st.column_config.NumberColumn("Actual Close", format="$%.2f"),
+            "current_price": st.column_config.NumberColumn(f"Price at Prediction ({selected_currency})", format=price_fmt),
+            "low_95": st.column_config.NumberColumn(f"Low 5% ({selected_currency})", format=price_fmt),
+            "high_95": st.column_config.NumberColumn(f"High 95% ({selected_currency})", format=price_fmt),
+            "actual": st.column_config.NumberColumn(f"Actual Close ({selected_currency})", format=price_fmt),
             "hit": "Result"
         }
     )
