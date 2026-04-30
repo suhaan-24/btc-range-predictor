@@ -10,7 +10,6 @@ dist/
 build/
 .DS_Store
 prediction_history.jsonl
-backtest_metrics.json
 .streamlit/secrets.toml
 .devcontainer/
 .python-version
