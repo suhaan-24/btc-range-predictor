@@ -130,8 +130,8 @@ def run_auto_backtest(cache_month: str):  # cache_month e.g. "2026-04" → re-ru
         (mu_arr[:, None] - 0.5 * sig_arr[:, None] ** 2) + sig_arr[:, None] * Z
     )
 
-    low_arr    = np.percentile(finals,  5, axis=1)
-    high_arr   = np.percentile(finals, 95, axis=1)
+    low_arr    = np.percentile(finals,  2.5, axis=1)
+    high_arr   = np.percentile(finals, 97.5, axis=1)
     width_arr  = high_arr - low_arr
     hit_arr    = ((act_arr >= low_arr) & (act_arr <= high_arr)).astype(float)
 
@@ -162,7 +162,7 @@ if os.path.exists(METRICS_FILE):
         metrics = json.load(f)
     _metrics_source = "local backtest.py"
 else:
-    _cache_month = date.today().strftime("%Y-%m")
+    _cache_month = date.today().strftime("%Y-%m") + "-v2"
     with st.spinner("Computing 30-day backtest — runs once per month, results are cached..."):
         metrics = run_auto_backtest(_cache_month)
     _metrics_source = f"auto · computed {metrics['computed_at']}"
