@@ -243,12 +243,12 @@ else:
 st.subheader("Live Prediction")
 c1, c2, c3 = st.columns(3)
 c1.metric("Current BTC Price", fmt(current_price))
-c2.metric("Predicted Low (5%)", fmt(low_95))
-c3.metric("Predicted High (95%)", fmt(high_95))
+c2.metric("95% CI Lower Bound", fmt(low_95))
+c3.metric("95% CI Upper Bound", fmt(high_95))
 
 width = high_95 - low_95
 st.info(
-    f"**90% Prediction Range ({curr_name}):** {fmt(low_95)} — {fmt(high_95)}  "
+    f"**95% Prediction Interval ({curr_name}):** {fmt(low_95)} — {fmt(high_95)}  "
     f"(width: {fmt(width)})"
 )
 

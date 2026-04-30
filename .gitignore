@@ -9,7 +9,7 @@ env/
 dist/
 build/
 .DS_Store
-*.jsonl
+prediction_history.jsonl
 backtest_metrics.json
 .streamlit/secrets.toml
 .devcontainer/
