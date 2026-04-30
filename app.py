@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from datetime import datetime
+from datetime import datetime, date
 from model import fetch_btc_data, predict_range
 
 
@@ -99,27 +99,82 @@ def fmt(usd_value):
     return f"{curr_symbol}{usd_value * fx_rate:,.2f}"
 
 
+# ─── Auto Backtest (runs inside the app, cached monthly) ─────────────────────
+
+@st.cache_data(ttl=30 * 24 * 3600, persist="disk")
+def run_auto_backtest(cache_month: str):  # cache_month e.g. "2026-04" → re-runs monthly
+    """
+    Fully-vectorised 30-day backtest using rolling 48-bar volatility + GBM.
+    No per-bar FIGARCH re-fit — completes in ~3 seconds via NumPy broadcasting.
+    cache_month is only used as a cache key; it forces a fresh run each calendar month.
+    """
+    prices   = fetch_btc_data(limit=1270)          # 550 lookback + 720 test bars
+    log_ret  = np.log(prices / prices.shift(1)).dropna()
+
+    n_test  = min(720, len(prices) - 551)
+    t_start = len(prices) - n_test - 1
+    t_end   = len(prices) - 1
+
+    roll_std  = log_ret.rolling(48, min_periods=10).std().fillna(log_ret.std())
+    roll_mean = log_ret.rolling(48, min_periods=10).mean().fillna(log_ret.mean())
+
+    S0_arr  = prices.iloc[t_start:t_end].values
+    sig_arr = roll_std.iloc[t_start:t_end].values.clip(1e-6, None)
+    mu_arr  = roll_mean.iloc[t_start:t_end].values
+    act_arr = prices.iloc[t_start + 1:t_end + 1].values
+
+    # All 720 bars × 1 000 sims in one broadcast — shape (n_test, 1000)
+    nu  = 6.0
+    Z   = np.random.standard_t(nu, size=(len(S0_arr), 1000)) * np.sqrt((nu - 2) / nu)
+    finals = S0_arr[:, None] * np.exp(
+        (mu_arr[:, None] - 0.5 * sig_arr[:, None] ** 2) + sig_arr[:, None] * Z
+    )
+
+    low_arr    = np.percentile(finals,  5, axis=1)
+    high_arr   = np.percentile(finals, 95, axis=1)
+    width_arr  = high_arr - low_arr
+    hit_arr    = ((act_arr >= low_arr) & (act_arr <= high_arr)).astype(float)
+
+    alpha = 0.05
+    penalty = np.where(
+        act_arr < low_arr,  (2 / alpha) * (low_arr  - act_arr),
+        np.where(act_arr > high_arr, (2 / alpha) * (act_arr - high_arr), 0.0)
+    )
+    winkler_arr = width_arr + penalty
+
+    return {
+        "coverage_95":     float(hit_arr.mean()),
+        "avg_width_95":    float(width_arr.mean()),
+        "mean_winkler_95": float(winkler_arr.mean()),
+        "n_predictions":   int(len(hit_arr)),
+        "computed_at":     str(date.today()),
+        "period":          cache_month,
+    }
+
+
 # ─── Load Backtest Metrics ───────────────────────────────────────────────────
 
 METRICS_FILE = "backtest_metrics.json"
 HISTORY_FILE = "prediction_history.jsonl"
 
-_metrics_available = os.path.exists(METRICS_FILE)
-if _metrics_available:
+if os.path.exists(METRICS_FILE):
     with open(METRICS_FILE) as f:
         metrics = json.load(f)
+    _metrics_source = "local backtest.py"
 else:
-    metrics = {"coverage_95": 0.0, "avg_width_95": 0.0, "mean_winkler_95": 0.0}
+    _cache_month = date.today().strftime("%Y-%m")
+    with st.spinner("Computing 30-day backtest — runs once per month, results are cached..."):
+        metrics = run_auto_backtest(_cache_month)
+    _metrics_source = f"auto · computed {metrics['computed_at']}"
 
 # ─── Backtest Metrics Row ────────────────────────────────────────────────────
 
 st.subheader("Backtest Performance (30-day)")
-if not _metrics_available:
-    st.warning("Backtest metrics not found. Run `python backtest.py` locally and commit `backtest_metrics.json` to see results.")
 col1, col2, col3 = st.columns(3)
-col1.metric("Coverage (95%)", f"{metrics['coverage_95']:.2%}" if _metrics_available else "—")
-col2.metric("Avg Width", fmt(metrics['avg_width_95']) if _metrics_available else "—")
-col3.metric("Mean Winkler", fmt(metrics['mean_winkler_95']) if _metrics_available else "—")
+col1.metric("Coverage (95%)", f"{metrics['coverage_95']:.2%}")
+col2.metric("Avg Width", fmt(metrics['avg_width_95']))
+col3.metric("Mean Winkler", fmt(metrics['mean_winkler_95']))
+st.caption(f"{metrics.get('n_predictions', '—')} predictions · {_metrics_source}")
 
 st.divider()
 
